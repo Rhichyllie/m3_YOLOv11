@@ -1,9 +1,8 @@
 # ============================================================
 # TRABALHO M3 - YOLOv11 para detecção de caracteres em placas
-# Script único para Colab: prepara dataset, treina YOLOv11,
-# Avalia no conjunto de teste (Precisão, Recall, IoU, F1 e matriz de confusão).
+# Script único: prepara dataset, treina YOLOv11,
+# avalia no conjunto de teste (Precisão, Recall, IoU, F1 e matriz de confusão).
 # ============================================================
-
 
 # 1) Imports principais
 import os, random, shutil
@@ -19,6 +18,7 @@ from sklearn.metrics import (
     recall_score,
     f1_score,
 )
+from collections import defaultdict
 
 # ------------------------------------------------------------
 # CONFIGURAÇÕES DO DATASET
@@ -26,11 +26,10 @@ from sklearn.metrics import (
 BASE_DIR = Path(__file__).resolve().parent
 
 # PASTA ONDE ESTÃO TODAS AS IMAGENS + ARQUIVOS .TXT ORIGINAIS (M2)
-RAW_DIR = BASE_DIR / "dataset_completo"
+RAW_DIR = BASE_DIR / "dataset"       # <<< NOME EXATO DA PASTA
 
 # PASTA DE SAÍDA NO FORMATO ESPERADO PELO ULTRALYTICS (train/val/test)
-YOLO_DIR = Path(__file__).resolve().parent / "placas_yolo"
-
+YOLO_DIR = BASE_DIR / "placas_yolo"
 
 # Proporções dos splits (por placa)
 TRAIN_RATIO = 0.7
@@ -55,7 +54,9 @@ def get_plate_signature(label_path: Path):
     (tupla com os IDs de classe dos caracteres ordenados da esquerda
     para a direita).
     """
-    lines = Path(label_path).read_text().strip().splitlines()
+    # encoding explícito pra evitar frescura no Windows
+    text = Path(label_path).read_text(encoding="utf-8")
+    lines = text.strip().splitlines()
     entries = []
     for line in lines:
         parts = line.strip().split()
@@ -71,13 +72,14 @@ def get_plate_signature(label_path: Path):
     signature = tuple(cls for _, cls in entries)
     return signature
 
-# percorre recursivamente a pasta RAW_DIR pegando todas as imagens
+print(f"\n[INFO] Procurando imagens em {RAW_DIR} ...")
 all_images = [p for p in RAW_DIR.rglob("*") if p.suffix.lower() in IMAGE_EXTS]
+print(f"[INFO] Encontradas {len(all_images)} imagens com extensão válida.\n")
 
 dataset_items = []   # cada item: {"img": Path, "label": Path, "signature": tuple}
 classes_set = set()
 
-for img_path in all_images:
+for idx, img_path in enumerate(all_images, 1):
     label_path = img_path.with_suffix(".txt")  # mesmo nome, extensão .txt
     if not label_path.exists():
         print(f"[AVISO] sem label para {img_path.name}, ignorando essa imagem.")
@@ -89,7 +91,7 @@ for img_path in all_images:
         continue
 
     # acumula classes usadas
-    with open(label_path, "r") as f:
+    with open(label_path, "r", encoding="utf-8") as f:
         for line in f:
             parts = line.strip().split()
             if len(parts) >= 1:
@@ -100,15 +102,21 @@ for img_path in all_images:
 
     dataset_items.append({"img": img_path, "label": label_path, "signature": signature})
 
-print(f"Total de imagens com label: {len(dataset_items)}")
+    # LOG a cada 500 imagens pra mostrar progresso
+    if idx % 500 == 0 or idx == len(all_images):
+        print(f"[INFO] Processadas {idx}/{len(all_images)} imagens...")
+
+print(f"\n[INFO] Total de imagens com label: {len(dataset_items)}")
+
+if not dataset_items:
+    print("[ERRO] Nenhuma imagem com label foi encontrada. Verifique a pasta 'dataset'.")
+    raise SystemExit(1)
 
 # ------------------------------------------------------------
 # 3) SPLIT POR PLACA: train / val / test
 #    - garante que imagens com a mesma assinatura de placa
 #      fiquem sempre no mesmo conjunto
 # ------------------------------------------------------------
-from collections import defaultdict
-
 plates_dict = defaultdict(list)  # assinatura -> [items]
 for item in dataset_items:
     plates_dict[item["signature"]].append(item)
@@ -135,16 +143,26 @@ for sig, items in plates_dict.items():
         split = "test"
     splits[split].extend(items)
 
+print("\n[INFO] Tamanho dos splits (por imagem):")
 for split_name, items in splits.items():
-    print(f"{split_name}: {len(items)} imagens")
+    print(f"  {split_name}: {len(items)} imagens")
 
 # ------------------------------------------------------------
 # 4) ORGANIZA ARQUIVOS NO FORMATO YOLO (imagens/labels por split)
 # ------------------------------------------------------------
-# limpa/Cria pasta de saída
+print("\n[INFO] Organizando dataset no formato YOLO em:", YOLO_DIR)
+
+# limpa/Cria pasta de saída (com tolerância ao Windows frescurento)
 if YOLO_DIR.exists():
-    shutil.rmtree(YOLO_DIR)
+    try:
+        print(f"[INFO] Apagando pasta antiga: {YOLO_DIR}")
+        shutil.rmtree(YOLO_DIR)
+    except Exception as e:
+        print(f"[AVISO] Não consegui apagar completamente {YOLO_DIR}: {e}")
+        print("[AVISO] Vou reaproveitar a pasta existente e sobrescrever arquivos quando copiar.")
+
 YOLO_DIR.mkdir(parents=True, exist_ok=True)
+
 
 for split_name, items in splits.items():
     img_out_dir = YOLO_DIR / "images" / split_name
@@ -158,7 +176,7 @@ for split_name, items in splits.items():
         shutil.copy2(item["img"], dst_img)
         shutil.copy2(item["label"], dst_lbl)
 
-print(f"Dataset organizado em: {YOLO_DIR}")
+print(f"[INFO] Dataset organizado em: {YOLO_DIR}")
 
 # ------------------------------------------------------------
 # 5) CRIA ARQUIVO YAML PARA O ULTRALYTICS
@@ -184,31 +202,36 @@ data_yaml = {
 }
 
 yaml_path = YOLO_DIR / "placas.yaml"
-with open(yaml_path, "w") as f:
+with open(yaml_path, "w", encoding="utf-8") as f:
     yaml.dump(data_yaml, f, sort_keys=False, allow_unicode=True)
 
-print("Arquivo YAML criado em:", yaml_path)
+print("\n[INFO] Arquivo YAML criado em:", yaml_path)
+print("----------------------------------------------")
 print(yaml_path.read_text())
+print("----------------------------------------------\n")
 
 # ------------------------------------------------------------
 # 6) TREINA MODELO YOLOv11
 # ------------------------------------------------------------
-# Carrega modelo base (nano). Pode trocar por yolo11s.pt, yolo11m.pt etc.
+print("[INFO] Carregando modelo YOLO11n...")
 model = YOLO("yolo11n.pt")
 
+print("[INFO] Iniciando treino...")
 results_train = model.train(
     data=str(yaml_path),
-    epochs=80,          # ajustar conforme tempo disponível
+    epochs=25,          # mais leve que 80 pra CPU
     imgsz=640,
-    batch=16,
-    patience=15,        # early stopping
+    batch=8,            # batch menor ajuda bastante em CPU
+    patience=10,        # early stopping
     project="runs_placas",
     name="yolo11_chars",
+    workers=0,          # importante no Windows para evitar problemas de multiprocessing
+    device="cpu",       # força usar CPU
 )
 
 # Caminho do melhor modelo salvo
 best_model_path = Path("runs_placas") / "yolo11_chars" / "weights" / "best.pt"
-print("Melhor modelo salvo em:", best_model_path)
+print("\n[INFO] Melhor modelo salvo em:", best_model_path)
 
 # Recarrega melhor modelo treinado
 best_model = YOLO(str(best_model_path))
@@ -219,6 +242,8 @@ best_model = YOLO(str(best_model_path))
 #    - e métricas manuais por caractere (IoU médio, F1, matriz de confusão)
 # ------------------------------------------------------------
 
+print("\n[INFO] Rodando avaliação no conjunto de TEST...")
+
 # 7.1) Validação padrão Ultralytics com gráficos
 metrics_test = best_model.val(
     data=str(yaml_path),
@@ -227,6 +252,8 @@ metrics_test = best_model.val(
     conf=0.25,
     iou=0.5,
     plots=True,   # gera confusion_matrix.png, PR-curves etc.
+    workers=0,
+    device="cpu",
 )
 
 print("\n--- Métricas Ultralytics (Detecção) ---")
@@ -279,7 +306,7 @@ def evaluate_on_split(model, images_dir: Path, labels_dir: Path,
 
         # Ground truth
         gt_boxes = []
-        with open(lbl_path, "r") as f:
+        with open(lbl_path, "r", encoding="utf-8") as f:
             for line in f:
                 parts = line.strip().split()
                 if len(parts) < 5:
